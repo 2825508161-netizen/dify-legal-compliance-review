@@ -1,4 +1,5 @@
 import json
+import math
 import re
 
 
@@ -131,12 +132,22 @@ def _display_location(page_start, page_end, paragraph_start, paragraph_end):
     paragraph_end = _as_int(paragraph_end)
 
     if paragraph_start is None:
-        return "位置待核验"
+        if page_start is None:
+            return "页码待定位·位置待核验"
+        page_end = page_end or page_start
+        return (
+            "第%s页·段落待核验" % page_start
+            if page_start == page_end
+            else "第%s—%s页·段落待核验" % (page_start, page_end)
+        )
     paragraph_end = paragraph_end or paragraph_start
     if page_start is None:
         if paragraph_start == paragraph_end:
-            return "第%s段" % paragraph_start
-        return "第%s—%s段" % (paragraph_start, paragraph_end)
+            return "页码待定位·第%s段" % paragraph_start
+        return "页码待定位·第%s—%s段" % (
+            paragraph_start,
+            paragraph_end,
+        )
     page_end = page_end or page_start
     if page_start == page_end:
         if paragraph_start == paragraph_end:
@@ -154,6 +165,89 @@ def _display_location(page_start, page_end, paragraph_start, paragraph_end):
     )
 
 
+def _safe_confidence(value):
+    """Return a bounded confidence plus a user-visible adjustment warning."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return 0.5, "模型未提供有效置信度，已使用默认值 0.5"
+    if isinstance(value, bool):
+        return 0.5, "模型置信度不是有效数字，已使用默认值 0.5"
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.5, "模型置信度不是有效数字，已使用默认值 0.5"
+    if not math.isfinite(confidence):
+        return 0.5, "模型置信度不是有限数字，已使用默认值 0.5"
+    if confidence < 0.0:
+        return 0.0, "模型置信度低于 0，已调整为 0"
+    if confidence > 1.0:
+        return 1.0, "模型置信度高于 1，已调整为 1"
+    return confidence, ""
+
+
+def _valid_positive_range(start, end):
+    start = _as_int(start)
+    end = _as_int(end)
+    if start is None or start <= 0:
+        return None, None
+    end = end if end is not None else start
+    if end < start:
+        return None, None
+    return start, end
+
+
+def _verified_location(chunk, model_location):
+    """Use document-derived bounds; never trust an unconstrained model page."""
+    model_location = model_location if isinstance(model_location, dict) else {}
+    page_start, page_end = _valid_positive_range(
+        chunk.get("page_start"), chunk.get("page_end")
+    )
+    paragraph_start, paragraph_end = _valid_positive_range(
+        chunk.get("paragraph_start"), chunk.get("paragraph_end")
+    )
+
+    model_page_start, model_page_end = _valid_positive_range(
+        model_location.get("page_start"), model_location.get("page_end")
+    )
+    model_paragraph_start, model_paragraph_end = _valid_positive_range(
+        model_location.get("paragraph_start"),
+        model_location.get("paragraph_end"),
+    )
+
+    warnings = []
+    if model_page_start is not None:
+        if page_start is None:
+            warnings.append("模型提供的页码无法由文档分段确认，已标记为页码待定位")
+        elif (model_page_start, model_page_end) != (page_start, page_end):
+            warnings.append("模型页码与文档分段位置不一致，已改用文档分段页码")
+
+    if paragraph_start is not None and model_paragraph_start is not None:
+        if not (
+            paragraph_start <= model_paragraph_start <= paragraph_end
+            and paragraph_start <= model_paragraph_end <= paragraph_end
+        ):
+            warnings.append("模型段落号超出当前分段范围，已改用文档分段位置")
+        else:
+            paragraph_start = model_paragraph_start
+            paragraph_end = model_paragraph_end
+
+    warning = "；".join(warnings)
+    return {
+        "chunk_id": chunk.get("chunk_id"),
+        "page_start": page_start,
+        "page_end": page_end,
+        "page_verification_status": "source_verified" if page_start else "待定位",
+        "paragraph_start": paragraph_start,
+        "paragraph_end": paragraph_end,
+        "model_location_adjusted": bool(warnings),
+        "locator_label": _display_location(
+            page_start,
+            page_end,
+            paragraph_start,
+            paragraph_end,
+        ),
+    }, warning
+
+
 def _knowledge_items(knowledge_result):
     """Accept either the built-in retrieval array or Knowledge API JSON body."""
     value = knowledge_result
@@ -168,6 +262,10 @@ def _knowledge_items(knowledge_result):
 
     if not isinstance(value, dict):
         return []
+
+    normalized_items = value.get("source_items")
+    if isinstance(normalized_items, list):
+        return normalized_items
 
     # HTTP Request can sometimes be passed as the complete node output.
     body = value.get("body")
@@ -269,7 +367,22 @@ def _fallback(chunk, reason, sources):
     }
 
 
-def main(raw_analysis: str, chunk: dict, knowledge_result) -> dict:
+def main(
+    raw_analysis: str,
+    chunk: dict,
+    knowledge_result,
+    retrieval_status: str = "",
+    retrieval_warning: str = "",
+) -> dict:
+    if isinstance(knowledge_result, dict):
+        retrieval_status = retrieval_status or str(
+            knowledge_result.get("retrieval_status") or ""
+        )
+        retrieval_warning = retrieval_warning or str(
+            knowledge_result.get("retrieval_warning") or ""
+        )
+    retrieval_status = retrieval_status or "success"
+    retrieval_problem = retrieval_status in {"empty", "error", "timeout"}
     sources = _source_list(knowledge_result)
     try:
         parsed = _parse_model_json(raw_analysis)
@@ -292,6 +405,16 @@ def main(raw_analysis: str, chunk: dict, knowledge_result) -> dict:
 
     partial_output = bool(parsed.get("_partial_model_output"))
     normalized = []
+    analysis_warnings = []
+    if partial_output:
+        analysis_warnings.append(
+            "模型响应未闭合；已恢复其中完整风险对象，建议结合原文人工复核。"
+        )
+    if retrieval_problem:
+        warning = retrieval_warning or (
+            "知识库检索状态为 %s，法律依据需人工复核" % retrieval_status
+        )
+        analysis_warnings.append(warning)
     for index, raw in enumerate(risks[:30], start=1):
         if not isinstance(raw, dict):
             continue
@@ -345,6 +468,7 @@ def main(raw_analysis: str, chunk: dict, knowledge_result) -> dict:
             or any_unverified_law
             or not excerpt_verified
             or partial_output
+            or retrieval_problem
         )
         uncertainty = str(raw.get("uncertainty_reason") or "").strip()
         if not excerpt_verified:
@@ -359,16 +483,29 @@ def main(raw_analysis: str, chunk: dict, knowledge_result) -> dict:
             uncertainty = (
                 uncertainty + "；模型响应未闭合，系统仅恢复了其中完整的风险对象"
             ).strip("；")
+        if retrieval_problem:
+            uncertainty = (
+                uncertainty
+                + "；"
+                + (
+                    retrieval_warning
+                    or "知识库检索状态为 %s" % retrieval_status
+                )
+            ).strip("；")
 
-        location = raw.get("location") if isinstance(raw.get("location"), dict) else {}
-        page_start = location.get("page_start", chunk.get("page_start"))
-        page_end = location.get("page_end", chunk.get("page_end"))
-        paragraph_start = location.get(
-            "paragraph_start", chunk.get("paragraph_start")
+        location, location_warning = _verified_location(
+            chunk,
+            raw.get("location"),
         )
-        paragraph_end = location.get(
-            "paragraph_end", chunk.get("paragraph_end")
-        )
+        confidence, confidence_warning = _safe_confidence(raw.get("confidence"))
+        for warning in (location_warning, confidence_warning):
+            if warning:
+                uncertainty = (uncertainty + "；" + warning).strip("；")
+                analysis_warnings.append(
+                    "%s-R%02d：%s"
+                    % (chunk.get("chunk_id", "UNKNOWN"), index, warning)
+                )
+        needs_manual = needs_manual or bool(location_warning or confidence_warning)
         normalized.append(
             {
                 "risk_id": "%s-R%02d"
@@ -378,19 +515,7 @@ def main(raw_analysis: str, chunk: dict, knowledge_result) -> dict:
                 "title": str(raw.get("title") or "未命名风险")[:200],
                 "original_excerpt": excerpt,
                 "excerpt_verified": excerpt_verified,
-                "location": {
-                    "chunk_id": chunk.get("chunk_id"),
-                    "page_start": _as_int(page_start),
-                    "page_end": _as_int(page_end),
-                    "paragraph_start": _as_int(paragraph_start),
-                    "paragraph_end": _as_int(paragraph_end),
-                    "locator_label": _display_location(
-                        page_start,
-                        page_end,
-                        paragraph_start,
-                        paragraph_end,
-                    ),
-                },
+                "location": location,
                 "issue": str(raw.get("issue") or "")[:2500],
                 "legal_bases": legal_bases,
                 "possible_consequences": str(
@@ -405,9 +530,8 @@ def main(raw_analysis: str, chunk: dict, knowledge_result) -> dict:
                 )[:1200],
                 "needs_manual_review": needs_manual,
                 "uncertainty_reason": uncertainty,
-                "confidence": max(
-                    0.0, min(1.0, float(raw.get("confidence") or 0.5))
-                ),
+                "confidence": confidence,
+                "confidence_warning": confidence_warning,
             }
         )
 
@@ -415,11 +539,7 @@ def main(raw_analysis: str, chunk: dict, knowledge_result) -> dict:
         "chunk_id": chunk.get("chunk_id", "UNKNOWN"),
         "analysis_status": "ok",
         "failure_reason": "",
-        "analysis_warning": (
-            "模型响应未闭合；已恢复其中完整风险对象，建议结合原文人工复核。"
-            if partial_output
-            else ""
-        ),
+        "analysis_warning": "；".join(analysis_warnings),
         "risks": normalized,
         "extracted_elements": (
             parsed.get("extracted_elements")
@@ -427,8 +547,9 @@ def main(raw_analysis: str, chunk: dict, knowledge_result) -> dict:
             else {}
         ),
         "retrieval_trace": sources,
-        "needs_manual_review": any(
-            item["needs_manual_review"] for item in normalized
-        ),
+        "retrieval_status": retrieval_status,
+        "retrieval_warning": retrieval_warning,
+        "needs_manual_review": retrieval_problem
+        or any(item["needs_manual_review"] for item in normalized),
     }
     return {"result_json": json.dumps(payload, ensure_ascii=False)}

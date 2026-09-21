@@ -1,5 +1,7 @@
 # Dify 文档法律与合规风险审查：部署与验收手册
 
+> 2026-09-19 状态说明：`code_nodes` 中的页码、置信度、知识库故障分类和重复风险合并修复已在本地完成并通过测试，但尚未同步或发布到线上 Dify。同步时请按本手册更新节点并先测试运行。
+
 ## 0. 当前实际搭建状态
 
 - Dify 工作流：`文档法律与合规风险审查（Workflow MVP）`
@@ -119,8 +121,11 @@ flowchart LR
   - `context_text: string`
   - `source_items: array[object]`
   - `source_count: number`
+  - `retrieval_status: string`（`success` / `empty` / `error` / `timeout`）
+  - `retrieval_warning: string`
+  - `http_status: number`
 - 代码文件：`code_nodes/03_normalize_kb_api_response.py`
-- 作用：把 `records[].segment` 转成模型可读法规上下文，同时保留文档名、分段 ID、原文和元数据作为审计追踪。
+- 作用：把 `records[].segment` 转成模型可读法规上下文，同时保留文档名、分段 ID、原文和元数据作为审计追踪；明确区分成功无结果、接口错误、请求超时和异常响应。
 
 ### 8. 逐段法律与合规风险分析（LLM，迭代内）
 
@@ -137,13 +142,17 @@ flowchart LR
   - `raw_analysis = 逐段法律与合规风险分析.text`
   - `chunk = 当前迭代.item`
   - `knowledge_result = 整理法规检索上下文.source_items`
+  - `retrieval_status = 整理法规检索上下文.retrieval_status`
+  - `retrieval_warning = 整理法规检索上下文.retrieval_warning`
 - 输出：`result_json: string`
 - 代码文件：`code_nodes/02_normalize_chunk_result.py`
 - 校验：
   - 风险等级只能是高、中、低；
   - 原文摘录必须能在当前分段中精确找到；
   - 法律依据必须能由检索结果支撑；
-  - 高风险、原文不匹配、依据不匹配均强制 `needs_manual_review=true`。
+  - 只使用当前文档分段能够确认的页码，不能确认时显示“页码待定位”；
+  - 非数字、空值、无限值及越界置信度会安全回退或截断，并记录处理提示；
+  - 高风险、原文不匹配、依据不匹配或知识库故障均强制 `needs_manual_review=true`。
 
 ### 10. 汇总去重并生成审查报告（Code，迭代外）
 
@@ -156,7 +165,7 @@ flowchart LR
   - `report_json: string`
   - `high_risk_count: number`
   - `manual_review_required: boolean`
-- 逻辑：解析各分段 JSON、合并相同类别和相同原文风险、按高/中/低排序、生成执行摘要、重点整改清单和审计追踪。
+- 逻辑：解析各分段 JSON；按风险类别桶和规范化原文合并重复风险；等级冲突时按不降低风险原则保留较高等级，使用同等级中证据更完整的内容，合并法律依据和全部位置，并强制人工复核；最后按高/中/低排序，生成执行摘要、重点整改清单和审计追踪。
 
 ### 11. Word/PDF 导出与输出
 
@@ -278,8 +287,8 @@ JSON 结构：
 2. 每段建议约 4,000–6,000 中文字符，保留少量相邻重叠，避免条款跨段丢失。
 3. 每段生成稳定 `chunk_id`，同时保存页码（能确认时）、段落范围和定位标签。
 4. 迭代节点逐段执行“检索 → 分析 → 校验”。
-5. 聚合节点按“风险类别 + 原文摘录/标题相似度”去重。
-6. 去重后保留所有重复位置，风险等级取较高者。
+5. 聚合节点按“风险类别桶 + 规范化原文摘录/标题”识别重复风险。
+6. 去重后保留所有重复位置并合并法律依据；等级不一致时保留较高等级、记录等级冲突并强制法务复核，同等级时优先使用原文及法规证据更完整的结果。
 7. 任一分段失败时，应记录到 `unresolved_chunks`，最终报告提示人工补审。
 
 ## E. 法律知识库组织、切片与元数据
