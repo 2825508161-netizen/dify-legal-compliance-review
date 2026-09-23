@@ -25,7 +25,7 @@ SAFE_JOB_ID = re.compile(r"^[a-f0-9]{32}$")
 
 app = FastAPI(
     title="AI 合同审核本地网关",
-    version="1.0.0",
+    version="1.1.0",
     docs_url="/docs",
     redoc_url=None,
 )
@@ -137,7 +137,8 @@ async def health() -> dict[str, Any]:
         "status": "ok",
         "mode": client.mode,
         "dify_configured": client.live_ready,
-        "version": "1.0.0",
+        "result_cache_enabled": False,
+        "version": "1.1.0",
     }
 
 

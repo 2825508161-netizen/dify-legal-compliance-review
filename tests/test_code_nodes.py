@@ -518,6 +518,110 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(len(report["processing_warnings"]), 1)
         self.assertIn("请求超时", result["report_markdown"])
 
+    def test_document_wide_forum_fact_corrects_false_absence_claim(self):
+        missing = self.make_risk(
+            "中",
+            1,
+            category="争议解决",
+            title="未约定适用法律、管辖法院或仲裁机构",
+            excerpt="软件服务采购合同",
+        )
+        missing["issue"] = "合同未约定适用法律、管辖法院或仲裁机构。"
+        missing["reasoning_summary"] = "合同缺少争议解决条款。"
+        actual = self.make_risk(
+            "中",
+            8,
+            category="争议解决",
+            title="争议管辖仅约定乙方所在地人民法院",
+            excerpt="双方发生争议时，仅可向乙方所在地人民法院起诉。",
+        )
+
+        result = self.aggregate([missing, actual])
+        report = json.loads(result["report_json"])
+        titles = [risk["title"] for risk in report["risks"]]
+
+        self.assertTrue(report["document_fact_checks"]["forum_clause_detected"])
+        self.assertIn("未明确约定合同适用法律及争议期间履行安排", titles)
+        self.assertIn("争议管辖仅约定乙方所在地人民法院", titles)
+        self.assertNotIn("未约定适用法律、管辖法院或仲裁机构", result["report_markdown"])
+        self.assertIn("不认定为缺少管辖法院", result["report_markdown"])
+
+    def test_false_forum_absence_only_risk_is_suppressed_when_clause_exists(self):
+        missing = self.make_risk(
+            "中",
+            1,
+            category="争议解决",
+            title="未约定管辖法院",
+            excerpt="软件服务采购合同",
+        )
+        missing["issue"] = "合同缺少争议解决和法院管辖条款。"
+        actual = self.make_risk(
+            "中",
+            8,
+            category="争议解决",
+            title="乙方所在地法院条款对甲方不利",
+            excerpt="双方发生争议时，仅可向乙方所在地人民法院起诉。",
+        )
+
+        report = json.loads(self.aggregate([missing, actual])["report_json"])
+        self.assertEqual(report["risk_summary"]["counts"]["total"], 1)
+        self.assertEqual(
+            report["conflict_adjustments"][0]["action"],
+            "suppressed_false_absence_risk",
+        )
+
+    def test_replacement_clause_blank_fields_become_visible_placeholders(self):
+        risk = self.make_risk("中", 1)
+        risk["replacement_clause"] = (
+            "合同签署后日内支付合同总价的%；税率__%。"
+            "统一社会信用代码：；住所：；授权代表：。"
+        )
+        result = self.aggregate([risk])
+        clause = json.loads(result["report_json"])["risks"][0][
+            "replacement_clause"
+        ]
+        self.assertNotIn("后日内", clause)
+        self.assertNotIn("的%", clause)
+        self.assertNotIn("__", clause)
+        self.assertGreaterEqual(clause.count("【待填写】"), 6)
+
+    def test_repeated_manual_review_reasons_are_collapsed(self):
+        risk = self.make_risk("中", 1)
+        risk["uncertainty_reason"] = (
+            "知识库未返回可用法律依据，且合同未披露交易背景；"
+            "至少一项法律依据未通过知识库文本匹配；"
+            "知识库检索请求成功，但没有返回可用的匹配片段；"
+            "合同未披露交易背景"
+        )
+        result = self.aggregate([risk])
+        reason = json.loads(result["report_json"])["risks"][0][
+            "uncertainty_reason"
+        ]
+        self.assertEqual(reason.count("知识库"), 1)
+        self.assertEqual(reason.count("合同未披露交易背景"), 1)
+
+    def test_identical_processing_warnings_are_grouped_by_chunks(self):
+        message = "知识库检索请求成功，但没有返回可用的匹配片段"
+        payloads = [
+            json.dumps(
+                {
+                    "chunk_id": chunk,
+                    "analysis_status": "ok",
+                    "analysis_warning": message,
+                    "risks": [],
+                    "retrieval_trace": [],
+                    "needs_manual_review": True,
+                },
+                ensure_ascii=False,
+            )
+            for chunk in ("C001", "C002")
+        ]
+        result = aggregator.main(payloads, "合同", "中国大陆")
+        report = json.loads(result["report_json"])
+        self.assertEqual(len(report["processing_warnings"]), 1)
+        self.assertEqual(report["processing_warnings"][0]["chunk_ids"], ["C001", "C002"])
+        self.assertEqual(result["report_markdown"].count(message), 1)
+
 
 class PipelineCompatibilityTests(unittest.TestCase):
     def test_contract_review_pipeline_still_produces_report_outputs(self):

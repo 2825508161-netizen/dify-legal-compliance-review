@@ -118,7 +118,8 @@ def test_health_reports_mock_not_configured(api_client: TestClient) -> None:
         "status": "ok",
         "mode": "mock",
         "dify_configured": False,
-        "version": "1.0.0",
+        "result_cache_enabled": False,
+        "version": "1.1.0",
     }
 
 
@@ -169,6 +170,8 @@ def test_mock_review_completes_and_preserves_location_rule(api_client: TestClien
     assert payload["status"] == "completed"
     assert payload["mode"] == "mock"
     assert payload["result"]["high_risk_count"] == 1
+    assert payload["result"]["integration"]["mode"] == "mock"
+    assert payload["result"]["integration"]["workflow_run_id"] == ""
     assert "页码待定位" in payload["result"]["report_markdown"]
 
 

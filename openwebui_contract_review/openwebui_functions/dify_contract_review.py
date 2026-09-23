@@ -195,6 +195,14 @@ class Pipe:
             lines.append(
                 "> ⚠️ 当前是本地模拟联调结果，不代表 Dify 已完成真实审核。\n"
             )
+        else:
+            integration = result.get("integration") or {}
+            run_id = str(integration.get("workflow_run_id") or "")
+            run_hint = run_id[-8:] if run_id else "已返回成功响应"
+            lines.append(
+                "> ✅ 本报告由独立 Dify 测试工作流实时生成，未使用本地模拟报告。"
+                f"运行标识：`{run_hint}`。\n"
+            )
         lines.append(f"> 高风险事项：**{high}** 项。")
         if manual:
             lines.append("> ⚠️ 报告包含必须由法务人工确认的内容。")

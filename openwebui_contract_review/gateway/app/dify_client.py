@@ -181,7 +181,20 @@ class DifyClient:
         except json.JSONDecodeError as exc:
             raise DifyIntegrationError("Dify 返回了无法解析的响应。") from exc
 
-        return self._normalise_outputs(outputs, downloads)
+        result = self._normalise_outputs(outputs, downloads)
+        result["integration"] = {
+            "mode": "live",
+            "workflow_run_id": str(
+                payload.get("workflow_run_id") or data.get("id") or ""
+            ),
+            "task_id": str(payload.get("task_id") or ""),
+            "status": str(data.get("status") or "succeeded"),
+            "elapsed_time": data.get("elapsed_time"),
+            "total_tokens": data.get("total_tokens"),
+            "created_at": data.get("created_at"),
+            "finished_at": data.get("finished_at"),
+        }
+        return result
 
     def _raise_for_dify(self, response: httpx.Response, action: str) -> None:
         if 200 <= response.status_code < 300:
@@ -281,4 +294,10 @@ class DifyClient:
             "high_risk_count": 1,
             "manual_review_required": True,
             "downloads": downloads,
+            "integration": {
+                "mode": "mock",
+                "workflow_run_id": "",
+                "task_id": "",
+                "status": "simulated",
+            },
         }
