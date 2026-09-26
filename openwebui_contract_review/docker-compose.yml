@@ -1,0 +1,66 @@
+services:
+  contract-review-gateway:
+    build:
+      context: ./gateway
+    container_name: ai-legal-contract-review-gateway
+    restart: unless-stopped
+    env_file:
+      - .env.local
+    environment:
+      REPORT_DIR: /app/data/reports
+      MOCK_DOCX_PATH: /app/mock/normal_contract_report.docx
+      MOCK_PDF_PATH: /app/mock/normal_contract_report.pdf
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - contract-review-reports:/app/data/reports
+      - ../outputs/phase2_test_artifacts/normal_contract_report.docx:/app/mock/normal_contract_report.docx:ro
+      - ../outputs/phase2_test_artifacts/normal_contract_report.pdf:/app/mock/normal_contract_report.pdf:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    networks:
+      - ai-legal
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:v0.11.3
+    container_name: ai-legal-open-webui
+    restart: unless-stopped
+    depends_on:
+      contract-review-gateway:
+        condition: service_healthy
+    environment:
+      WEBUI_AUTH: "false"
+      ENABLE_SIGNUP: "false"
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
+      ENABLE_VERSION_UPDATE_CHECK: "false"
+      ENABLE_COMMUNITY_SHARING: "false"
+      ENABLE_EVALUATION_ARENA_MODELS: "false"
+      WEBSOCKET_EVENT_CALLER_TIMEOUT: "180"
+      DEFAULT_LOCALE: zh-CN
+      TZ: Australia/Sydney
+    ports:
+      - "127.0.0.1:3000:8080"
+    volumes:
+      - open-webui-data:/app/backend/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks:
+      - ai-legal
+
+networks:
+  ai-legal:
+    name: ai-legal-local
+
+volumes:
+  open-webui-data:
+    name: ai-legal-open-webui-data
+  contract-review-reports:
+    name: ai-legal-contract-review-reports
